@@ -17,7 +17,7 @@ use Illuminate\Support\Facades\View;
 use Illuminate\Support\Str;
 use Intervention\Image\ImageServiceProvider;
 use Og\Cruid\Events\FormFieldsRegistered;
-use Og\Cruid\Facades\OgCruid as CruidFacade;
+use Og\Cruid\Facades\Cruid as CruidFacade;
 use Og\Cruid\FormFields\After\DescriptionHandler;
 use Og\Cruid\Http\Middleware\CruidAdminMiddleware;
 use Og\Cruid\Models\MenuItem;

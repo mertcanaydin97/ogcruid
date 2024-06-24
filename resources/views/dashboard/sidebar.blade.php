@@ -11,7 +11,7 @@
                             <img src="{{ Cruid::image($admin_logo_img) }}" alt="Logo Icon">
                         @endif
                     </div>
-                    <div class="title">{{Cruid::setting('admin.title', 'VOYAGER')}}</div>
+                    <div class="title">{{Cruid::setting('admin.title', 'Cruid')}}</div>
                 </a>
             </div><!-- .navbar-header -->
 
