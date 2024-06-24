@@ -23,7 +23,7 @@
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "Og\\Cruid\\": "src/"
+            "Og\\Cruid\\": "src/" 
         }
     },
     "autoload-dev": {
