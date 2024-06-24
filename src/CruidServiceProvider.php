@@ -2,359 +2,364 @@
 
 namespace Og\Cruid;
 
-use Arrilot\Widgets\Facade as Widget;
+use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Filesystem\Filesystem;
+use Illuminate\Foundation\AliasLoader;
+use Illuminate\Foundation\Support\Providers\AuthServiceProvider as ServiceProvider;
+use Illuminate\Pagination\Paginator;
+use Illuminate\Routing\Router;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\View;
 use Illuminate\Support\Str;
-use Og\Cruid\Actions\DeleteAction;
-use Og\Cruid\Actions\EditAction;
-use Og\Cruid\Actions\RestoreAction;
-use Og\Cruid\Actions\ViewAction;
-use Og\Cruid\Events\AlertsCollection;
-use Og\Cruid\FormFields\After\HandlerInterface as AfterHandlerInterface;
-use Og\Cruid\FormFields\HandlerInterface;
-use Og\Cruid\Models\Category;
-use Og\Cruid\Models\DataRow;
-use Og\Cruid\Models\DataType;
-use Og\Cruid\Models\Menu;
+use Intervention\Image\ImageServiceProvider;
+use Og\Cruid\Events\FormFieldsRegistered;
+use Og\Cruid\Facades\OgCruid as CruidFacade;
+use Og\Cruid\FormFields\After\DescriptionHandler;
+use Og\Cruid\Http\Middleware\CruidAdminMiddleware;
 use Og\Cruid\Models\MenuItem;
-use Og\Cruid\Models\Page;
-use Og\Cruid\Models\Permission;
-use Og\Cruid\Models\Post;
-use Og\Cruid\Models\Role;
 use Og\Cruid\Models\Setting;
-use Og\Cruid\Models\Translation;
-use Og\Cruid\Models\User;
-use Og\Cruid\Traits\Translatable;
+use Og\Cruid\Policies\BasePolicy;
+use Og\Cruid\Policies\MenuItemPolicy;
+use Og\Cruid\Policies\SettingPolicy;
+use Og\Cruid\Providers\CruidDummyServiceProvider;
+use Og\Cruid\Providers\CruidEventServiceProvider;
+use Og\Cruid\Seed;
+use Og\Cruid\Translator\Collection as TranslatorCollection;
 
-class Cruid
+class CruidServiceProvider extends ServiceProvider
 {
-    protected $version;
-    protected $filesystem;
-
-    protected $alerts = [];
-    protected $alertsCollected = false;
-
-    protected $formFields = [];
-    protected $afterFormFields = [];
-
-    protected $viewLoadingEvents = [];
-
-    protected $actions = [
-        DeleteAction::class,
-        RestoreAction::class,
-        EditAction::class,
-        ViewAction::class,
+    /**
+     * The policy mappings for the application.
+     *
+     * @var array
+     */
+    protected $policies = [
+        Setting::class  => SettingPolicy::class,
+        MenuItem::class => MenuItemPolicy::class,
     ];
 
-    protected $models = [
-        'Category'    => Category::class,
-        'DataRow'     => DataRow::class,
-        'DataType'    => DataType::class,
-        'Menu'        => Menu::class,
-        'MenuItem'    => MenuItem::class,
-        'Page'        => Page::class,
-        'Permission'  => Permission::class,
-        'Post'        => Post::class,
-        'Role'        => Role::class,
-        'Setting'     => Setting::class,
-        'User'        => User::class,
-        'Translation' => Translation::class,
+    protected $gates = [
+        'browse_admin',
+        'browse_bread',
+        'browse_database',
+        'browse_media',
+        'browse_compass',
     ];
 
-    public $setting_cache = null;
-
-    public function __construct()
+    /**
+     * Register the application services.
+     */
+    public function register()
     {
-        $this->filesystem = app(Filesystem::class);
+        $this->app->register(CruidEventServiceProvider::class);
+        $this->app->register(ImageServiceProvider::class);
+        $this->app->register(CruidDummyServiceProvider::class);
 
-        $this->findVersion();
-    }
+        $loader = AliasLoader::getInstance();
+        $loader->alias('OgCruid', CruidFacade::class);
 
-    public function model($name)
-    {
-        return app($this->models[Str::studly($name)]);
-    }
-
-    public function modelClass($name)
-    {
-        return $this->models[$name];
-    }
-
-    public function useModel($name, $object)
-    {
-        if (is_string($object)) {
-            $object = app($object);
-        }
-
-        $class = get_class($object);
-
-        if (isset($this->models[Str::studly($name)]) && !$object instanceof $this->models[Str::studly($name)]) {
-            throw new \Exception("[{$class}] must be instance of [{$this->models[Str::studly($name)]}].");
-        }
-
-        $this->models[Str::studly($name)] = $class;
-
-        return $this;
-    }
-
-    public function view($name, array $parameters = [])
-    {
-        foreach (Arr::get($this->viewLoadingEvents, $name, []) as $event) {
-            $event($name, $parameters);
-        }
-
-        return view($name, $parameters);
-    }
-
-    public function onLoadingView($name, \Closure $closure)
-    {
-        if (!isset($this->viewLoadingEvents[$name])) {
-            $this->viewLoadingEvents[$name] = [];
-        }
-
-        $this->viewLoadingEvents[$name][] = $closure;
-    }
-
-    public function formField($row, $dataType, $dataTypeContent)
-    {
-        if (!isset($this->formFields[$row->type])) {
-            throw new \Exception(__('Missing field type: ' . $row->type), 500);
-        }
-
-        $formField = $this->formFields[$row->type];
-
-        return $formField->handle($row, $dataType, $dataTypeContent);
-    }
-
-    public function afterFormFields($row, $dataType, $dataTypeContent)
-    {
-        return collect($this->afterFormFields)->filter(function ($after) use ($row, $dataType, $dataTypeContent) {
-            return $after->visible($row, $dataType, $dataTypeContent, $row->details);
+        $this->app->singleton('cruid', function () {
+            return new OgCruid();
         });
-    }
 
-    public function addFormField($handler)
-    {
-        if (!$handler instanceof HandlerInterface) {
-            $handler = app($handler);
-        }
-
-        $this->formFields[$handler->getCodename()] = $handler;
-
-        return $this;
-    }
-
-    public function addAfterFormField($handler)
-    {
-        if (!$handler instanceof AfterHandlerInterface) {
-            $handler = app($handler);
-        }
-
-        $this->afterFormFields[$handler->getCodename()] = $handler;
-
-        return $this;
-    }
-
-    public function formFields()
-    {
-        $connection = config('database.default');
-        $driver = config("database.connections.{$connection}.driver", 'mysql');
-
-        return collect($this->formFields)->filter(function ($after) use ($driver) {
-            return $after->supports($driver);
+        $this->app->singleton('CruidGuard', function () {
+            return config('auth.defaults.guard', 'web');
         });
-    }
 
-    public function addAction($action)
-    {
-        array_push($this->actions, $action);
-    }
+        $this->loadHelpers();
 
-    public function replaceAction($actionToReplace, $action)
-    {
-        $key = array_search($actionToReplace, $this->actions);
-        $this->actions[$key] = $action;
-    }
+        $this->registerAlertComponents();
+        $this->registerFormFields();
 
-    public function actions()
-    {
-        return $this->actions;
+        $this->registerConfigs();
+
+        if ($this->app->runningInConsole()) {
+            $this->registerPublishableResources();
+            $this->registerConsoleCommands();
+        }
+
+        if (!$this->app->runningInConsole() || config('app.env') == 'testing') {
+            $this->registerAppCommands();
+        }
     }
 
     /**
-     * Get a collection of dashboard widgets.
-     * Each of our widget groups contain a max of three widgets.
-     * After that, we will switch to a new widget group.
+     * Bootstrap the application services.
      *
-     * @return array - Array consisting of \Arrilot\Widget\WidgetGroup objects
+     * @param \Illuminate\Routing\Router $router
      */
-    public function dimmers()
+    public function boot(Router $router, Dispatcher $event)
     {
-        $widgetClasses = config('cruid.dashboard.widgets');
-        $dimmerGroups = [];
-        $dimmerCount = 0;
-        $dimmers = Widget::group("cruid::dimmers-{$dimmerCount}");
-
-        foreach ($widgetClasses as $widgetClass) {
-            $widget = app($widgetClass);
-
-            if ($widget->shouldBeDisplayed()) {
-
-                // Every third dimmer, we consider out WidgetGroup filled.
-                // We switch that out with another WidgetGroup.
-                if ($dimmerCount % 3 === 0 && $dimmerCount !== 0) {
-                    $dimmerGroups[] = $dimmers;
-                    $dimmerGroupTag = ceil($dimmerCount / 3);
-                    $dimmers = Widget::group("cruid::dimmers-{$dimmerGroupTag}");
+        if (config('ogcruiduser.add_default_role_on_register')) {
+            $model = Auth::guard(app('CruidGuard'))->getProvider()->getModel();
+            call_user_func($model.'::created', function ($user) use ($model) {
+                if (is_null($user->role_id)) {
+                    call_user_func($model.'::findOrFail', $user->id)
+                        ->setRole(config('ogcruiduser.default_role'))
+                        ->save();
                 }
-
-                $dimmers->addWidget($widgetClass);
-                $dimmerCount++;
-            }
+            });
         }
 
-        $dimmerGroups[] = $dimmers;
+        $this->loadViewsFrom(__DIR__.'/../resources/views', 'cruid');
 
-        return $dimmerGroups;
+        $router->aliasMiddleware('admin.user', CruidAdminMiddleware::class);
+
+        $this->loadTranslationsFrom(realpath(__DIR__.'/../publishable/lang'), 'cruid');
+
+        if (config('ogcruiddatabase.autoload_migrations', true)) {
+            if (config('app.env') == 'testing') {
+                $this->loadMigrationsFrom(realpath(__DIR__.'/migrations'));
+            }
+
+            $this->loadMigrationsFrom(realpath(__DIR__.'/../migrations'));
+        }
+
+        $this->loadAuth();
+
+        $this->registerViewComposers();
+
+        $event->listen('ogcruidalerts.collecting', function () {
+            $this->addStorageSymlinkAlert();
+        });
+
+        $this->bootTranslatorCollectionMacros();
+
+        if (method_exists('Paginator', 'useBootstrap')) {
+            Paginator::useBootstrap();
+        }
     }
 
-    public function setting($key, $default = null)
+    /**
+     * Load helpers.
+     */
+    protected function loadHelpers()
     {
-        $globalCache = config('cruid.settings.cache', false);
-
-        if ($globalCache && Cache::tags('settings')->has($key)) {
-            return Cache::tags('settings')->get($key);
+        foreach (glob(__DIR__.'/Helpers/*.php') as $filename) {
+            require_once $filename;
         }
+    }
 
-        if ($this->setting_cache === null) {
-            if ($globalCache) {
-                // A key is requested that is not in the cache
-                // this is a good opportunity to update all keys
-                // albeit not strictly necessary
-                Cache::tags('settings')->flush();
-            }
+    /**
+     * Register view composers.
+     */
+    protected function registerViewComposers()
+    {
+        // Register alerts
+        View::composer('cruid::*', function ($view) {
+            $view->with('alerts', CruidFacade::alerts());
+        });
+    }
 
-            foreach (self::model('Setting')->orderBy('order')->get() as $setting) {
-                $keys = explode('.', $setting->key);
-                @$this->setting_cache[$keys[0]][$keys[1]] = $setting->value;
-
-                if ($globalCache) {
-                    Cache::tags('settings')->forever($setting->key, $setting->value);
-                }
-            }
-        }
-
-        $parts = explode('.', $key);
-
-        if (count($parts) == 2) {
-            return @$this->setting_cache[$parts[0]][$parts[1]] ?: $default;
+    /**
+     * Add storage symlink alert.
+     */
+    protected function addStorageSymlinkAlert()
+    {
+        if (app('router')->current() !== null) {
+            $currentRouteAction = app('router')->current()->getAction();
         } else {
-            return @$this->setting_cache[$parts[0]] ?: $default;
+            $currentRouteAction = null;
         }
-    }
+        $routeName = is_array($currentRouteAction) ? Arr::get($currentRouteAction, 'as') : null;
 
-    public function image($file, $default = '')
-    {
-        if (!empty($file)) {
-            return str_replace('\\', '/', Storage::disk(config('cruid.storage.disk'))->url($file));
-        }
-
-        return $default;
-    }
-
-    public function routes()
-    {
-        require __DIR__.'/../routes/cruid.php';
-    }
-
-    public function getVersion()
-    {
-        return $this->version;
-    }
-
-    public function addAlert(Alert $alert)
-    {
-        $this->alerts[] = $alert;
-    }
-
-    public function alerts()
-    {
-        if (!$this->alertsCollected) {
-            event(new AlertsCollection($this->alerts));
-
-            $this->alertsCollected = true;
-        }
-
-        return $this->alerts;
-    }
-
-    protected function findVersion()
-    {
-        if (!is_null($this->version)) {
+        if ($routeName != 'ogcruiddashboard') {
             return;
         }
 
-        if ($this->filesystem->exists(base_path('composer.lock'))) {
-            // Get the composer.lock file
-            $file = json_decode(
-                $this->filesystem->get(base_path('composer.lock'))
-            );
+        $storage_disk = (!empty(config('ogcruidstorage.disk'))) ? config('ogcruidstorage.disk') : 'public';
 
-            // Loop through all the packages and get the version of cruid
-            foreach ($file->packages as $package) {
-                if ($package->name == 'og/cruid') {
-                    $this->version = $package->version;
-                    break;
+        if (request()->has('fix-missing-storage-symlink')) {
+            if (file_exists(public_path('storage'))) {
+                if (@readlink(public_path('storage')) == public_path('storage')) {
+                    rename(public_path('storage'), 'storage_old');
                 }
+            }
+
+            if (!file_exists(public_path('storage'))) {
+                $this->fixMissingStorageSymlink();
+            }
+        } elseif ($storage_disk == 'public') {
+            if (!file_exists(public_path('storage')) || @readlink(public_path('storage')) == public_path('storage')) {
+                $alert = (new Alert('missing-storage-symlink', 'warning'))
+                    ->title(__('cruid::error.symlink_missing_title'))
+                    ->text(__('cruid::error.symlink_missing_text'))
+                    ->button(__('cruid::error.symlink_missing_button'), '?fix-missing-storage-symlink=1');
+                CruidFacade::addAlert($alert);
             }
         }
     }
 
-    /**
-     * @param string|Model|Collection $model
-     *
-     * @return bool
-     */
-    public function translatable($model)
+    protected function fixMissingStorageSymlink()
     {
-        if (!config('cruid.multilingual.enabled')) {
-            return false;
+        app('files')->link(storage_path('app/public'), public_path('storage'));
+
+        if (file_exists(public_path('storage'))) {
+            $alert = (new Alert('fixed-missing-storage-symlink', 'success'))
+                ->title(__('cruid::error.symlink_created_title'))
+                ->text(__('cruid::error.symlink_created_text'));
+        } else {
+            $alert = (new Alert('failed-fixing-missing-storage-symlink', 'danger'))
+                ->title(__('cruid::error.symlink_failed_title'))
+                ->text(__('cruid::error.symlink_failed_text'));
         }
 
-        if (is_string($model)) {
-            $model = app($model);
-        }
-
-        if ($model instanceof Collection) {
-            $model = $model->first();
-        }
-
-        if (!is_subclass_of($model, Model::class)) {
-            return false;
-        }
-
-        $traits = class_uses_recursive(get_class($model));
-
-        return in_array(Translatable::class, $traits);
+        CruidFacade::addAlert($alert);
     }
 
-    public function getLocales()
+    /**
+     * Register alert components.
+     */
+    protected function registerAlertComponents()
     {
-        $appLocales = [];
-        if ($this->filesystem->exists(resource_path('lang/vendor/cruid'))) {
-            $appLocales = array_diff(scandir(resource_path('lang/vendor/cruid')), ['..', '.']);
+        $components = ['title', 'text', 'button'];
+
+        foreach ($components as $component) {
+            $class = 'OG\\Cruid\\Alert\\Components\\'.ucfirst(Str::camel($component)).'Component';
+
+            $this->app->bind("ogcruidalert.components.{$component}", $class);
+        }
+    }
+
+    protected function bootTranslatorCollectionMacros()
+    {
+        Collection::macro('translate', function () {
+            $transtors = [];
+
+            foreach ($this->all() as $item) {
+                $transtors[] = call_user_func_array([$item, 'translate'], func_get_args());
+            }
+
+            return new TranslatorCollection($transtors);
+        });
+    }
+
+    /**
+     * Register the publishable files.
+     */
+    private function registerPublishableResources()
+    {
+        $publishablePath = dirname(__DIR__).'/publishable';
+
+        $publishable = [
+            'cruid_avatar' => [
+                "{$publishablePath}/dummy_content/users/" => storage_path('app/public/users'),
+            ],
+            'seeders' => [
+                "{$publishablePath}/database/seeders/" => database_path('seeders'),
+            ],
+            'config' => [
+                "{$publishablePath}/config/ogcruidphp" => config_path('ogcruidphp'),
+            ],
+
+        ];
+
+        foreach ($publishable as $group => $paths) {
+            $this->publishes($paths, $group);
+        }
+    }
+
+    public function registerConfigs()
+    {
+        $this->mergeConfigFrom(
+            dirname(__DIR__).'/publishable/config/ogcruidphp',
+            'cruid'
+        );
+    }
+
+    public function loadAuth()
+    {
+        // DataType Policies
+
+        // This try catch is necessary for the Package Auto-discovery
+        // otherwise it will throw an error because no database
+        // connection has been made yet.
+        try {
+            if (Schema::hasTable(CruidFacade::model('DataType')->getTable())) {
+                $dataType = CruidFacade::model('DataType');
+                $dataTypes = $dataType->select('policy_name', 'model_name')->get();
+
+                foreach ($dataTypes as $dataType) {
+                    $policyClass = BasePolicy::class;
+                    if (isset($dataType->policy_name) && $dataType->policy_name !== ''
+                        && class_exists($dataType->policy_name)) {
+                        $policyClass = $dataType->policy_name;
+                    }
+
+                    $this->policies[$dataType->model_name] = $policyClass;
+                }
+
+                $this->registerPolicies();
+            }
+        } catch (\PDOException $e) {
+            Log::info('No database connection yet in CruidServiceProvider loadAuth(). No worries, this is not a problem!');
         }
 
-        $vendorLocales = array_diff(scandir(realpath(__DIR__.'/../publishable/lang')), ['..', '.']);
-        $allLocales = array_merge($vendorLocales, $appLocales);
+        // Gates
+        foreach ($this->gates as $gate) {
+            Gate::define($gate, function ($user) use ($gate) {
+                return $user->hasPermission($gate);
+            });
+        }
+    }
 
-        asort($allLocales);
+    protected function registerFormFields()
+    {
+        $formFields = [
+            'checkbox',
+            'multiple_checkbox',
+            'color',
+            'date',
+            'file',
+            'image',
+            'multiple_images',
+            'media_picker',
+            'number',
+            'password',
+            'radio_btn',
+            'rich_text_box',
+            'code_editor',
+            'markdown_editor',
+            'select_dropdown',
+            'select_multiple',
+            'text',
+            'text_area',
+            'time',
+            'timestamp',
+            'hidden',
+            'coordinates',
+        ];
 
-        return $allLocales;
+        foreach ($formFields as $formField) {
+            $class = Str::studly("{$formField}_handler");
+
+            CruidFacade::addFormField("OG\\Cruid\\FormFields\\{$class}");
+        }
+
+        CruidFacade::addAfterFormField(DescriptionHandler::class);
+
+        event(new FormFieldsRegistered($formFields));
+    }
+
+    /**
+     * Register the commands accessible from the Console.
+     */
+    private function registerConsoleCommands()
+    {
+        $this->commands(Commands\InstallCommand::class);
+        $this->commands(Commands\ControllersCommand::class);
+        $this->commands(Commands\AdminCommand::class);
+    }
+
+    /**
+     * Register the commands accessible from the App.
+     */
+    private function registerAppCommands()
+    {
+        $this->commands(Commands\MakeModelCommand::class);
     }
 }
