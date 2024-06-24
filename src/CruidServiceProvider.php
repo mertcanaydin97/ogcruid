@@ -60,10 +60,10 @@ class CruidServiceProvider extends ServiceProvider
         $this->app->register(CruidDummyServiceProvider::class);
 
         $loader = AliasLoader::getInstance();
-        $loader->alias('OgCruid', CruidFacade::class);
+        $loader->alias('Cruid', CruidFacade::class);
 
         $this->app->singleton('cruid', function () {
-            return new OgCruid();
+            return new Cruid();
         });
 
         $this->app->singleton('CruidGuard', function () {
@@ -94,12 +94,12 @@ class CruidServiceProvider extends ServiceProvider
      */
     public function boot(Router $router, Dispatcher $event)
     {
-        if (config('ogcruiduser.add_default_role_on_register')) {
+        if (config('cruid.user.add_default_role_on_register')) {
             $model = Auth::guard(app('CruidGuard'))->getProvider()->getModel();
             call_user_func($model.'::created', function ($user) use ($model) {
                 if (is_null($user->role_id)) {
                     call_user_func($model.'::findOrFail', $user->id)
-                        ->setRole(config('ogcruiduser.default_role'))
+                        ->setRole(config('cruid.user.default_role'))
                         ->save();
                 }
             });
@@ -111,7 +111,7 @@ class CruidServiceProvider extends ServiceProvider
 
         $this->loadTranslationsFrom(realpath(__DIR__.'/../publishable/lang'), 'cruid');
 
-        if (config('ogcruiddatabase.autoload_migrations', true)) {
+        if (config('cruid.database.autoload_migrations', true)) {
             if (config('app.env') == 'testing') {
                 $this->loadMigrationsFrom(realpath(__DIR__.'/migrations'));
             }
@@ -123,7 +123,7 @@ class CruidServiceProvider extends ServiceProvider
 
         $this->registerViewComposers();
 
-        $event->listen('ogcruidalerts.collecting', function () {
+        $event->listen('cruid.alerts.collecting', function () {
             $this->addStorageSymlinkAlert();
         });
 
@@ -167,11 +167,11 @@ class CruidServiceProvider extends ServiceProvider
         }
         $routeName = is_array($currentRouteAction) ? Arr::get($currentRouteAction, 'as') : null;
 
-        if ($routeName != 'ogcruiddashboard') {
+        if ($routeName != 'cruid.dashboard') {
             return;
         }
 
-        $storage_disk = (!empty(config('ogcruidstorage.disk'))) ? config('ogcruidstorage.disk') : 'public';
+        $storage_disk = (!empty(config('cruid.storage.disk'))) ? config('cruid.storage.disk') : 'public';
 
         if (request()->has('fix-missing-storage-symlink')) {
             if (file_exists(public_path('storage'))) {
@@ -219,9 +219,9 @@ class CruidServiceProvider extends ServiceProvider
         $components = ['title', 'text', 'button'];
 
         foreach ($components as $component) {
-            $class = 'OG\\Cruid\\Alert\\Components\\'.ucfirst(Str::camel($component)).'Component';
+            $class = 'Og\\Cruid\\Alert\\Components\\'.ucfirst(Str::camel($component)).'Component';
 
-            $this->app->bind("ogcruidalert.components.{$component}", $class);
+            $this->app->bind("cruid.alert.components.{$component}", $class);
         }
     }
 
@@ -253,7 +253,7 @@ class CruidServiceProvider extends ServiceProvider
                 "{$publishablePath}/database/seeders/" => database_path('seeders'),
             ],
             'config' => [
-                "{$publishablePath}/config/ogcruidphp" => config_path('ogcruidphp'),
+                "{$publishablePath}/config/cruid.php" => config_path('cruid.php'),
             ],
 
         ];
@@ -266,7 +266,7 @@ class CruidServiceProvider extends ServiceProvider
     public function registerConfigs()
     {
         $this->mergeConfigFrom(
-            dirname(__DIR__).'/publishable/config/ogcruidphp',
+            dirname(__DIR__).'/publishable/config/cruid.php',
             'cruid'
         );
     }
@@ -337,7 +337,7 @@ class CruidServiceProvider extends ServiceProvider
         foreach ($formFields as $formField) {
             $class = Str::studly("{$formField}_handler");
 
-            CruidFacade::addFormField("OG\\Cruid\\FormFields\\{$class}");
+            CruidFacade::addFormField("Og\\Cruid\\FormFields\\{$class}");
         }
 
         CruidFacade::addAfterFormField(DescriptionHandler::class);
