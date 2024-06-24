@@ -42,8 +42,8 @@
     "extra": {
         "laravel": {
             "providers": [
-                "Og\\Cruid\\VoyagerServiceProvider",
-                "Og\\Cruid\\Providers\\VoyagerDummyServiceProvider"
+                "Og\\Cruid\\CruidServiceProvider",
+                "Og\\Cruid\\Providers\\CruidDummyServiceProvider"
             ]
         }
     },
